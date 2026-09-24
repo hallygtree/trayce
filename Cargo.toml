@@ -1,0 +1,20 @@
+[package]
+name = "trayce"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono = { version = "0.4.44", default-features = false, features = ["clock", "std"] }
+dirs = "6.0.0"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+tao = "0.35.2"
+tray-icon = "0.24.0"
+# Loopback only: the Antigravity desktop app's local language server.
+ureq = { version = "3.4.2", default-features = false, features = ["rustls", "json"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Still required: wake_macos pokes the run loop so tray changes draw immediately.
+objc2-core-foundation = "0.3.2"

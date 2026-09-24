@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macos
+          - os: ubuntu-latest
+            name: linux
+          - os: windows-latest
+            name: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux tray dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxdo-dev libayatana-appindicator3-dev
+
+      - name: Build macOS app bundle
+        if: runner.os == 'macOS'
+        run: |
+          ./build-macos.sh
+          ditto -c -k --keepParent Trayce.app trayce-macos.zip
+
+      - name: Build Linux binary
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --release
+          tar -czf trayce-linux.tar.gz -C target/release trayce
+
+      - name: Build Windows binary
+        if: runner.os == 'Windows'
+        run: |
+          cargo build --release
+          Compress-Archive -Path target/release/trayce.exe -DestinationPath trayce-windows.zip
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            trayce-macos.zip
+            trayce-linux.tar.gz
+            trayce-windows.zip
+          if-no-files-found: ignore
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+          generate_release_notes: true
