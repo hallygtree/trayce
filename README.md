@@ -36,7 +36,7 @@ which covered Claude only.
 - **Real percentages where they exist.**
   - **Codex:** the server's own numbers.
   - **Antigravity:** the real quota while its desktop app is open.
-  - **Claude:** a percentage learned from your own limit hits.
+  - **Claude:** Claude Code's own numbers, via its status line.
 - **No fake precision.** A window with no known limit shows a token count instead of a guessed percentage.
 - **Offline and read-only.** No credentials read, no calls to any provider, log files opened read-only.
 - **A colour you can read at a glance.** The icon dot turns green, orange or red with the fullest window on screen.
@@ -46,7 +46,7 @@ which covered Claude only.
 
 | Tool | Where Trayce reads from | What you see |
 |------|-------------------------|--------------|
-| **Claude Code** | `~/.claude/projects/**/*.jsonl` | 5h block and rolling 7d totals; the 5h window shows a real **%** once auto-calibrated |
+| **Claude Code** | Claude Code's status-line data, plus `~/.claude/projects/**/*.jsonl` | real **%** of the 5h and weekly windows once the status line is set up (`trayce --setup-claude`); otherwise 5h / 7d tokens with an estimated 5h % |
 | **Codex CLI** | `~/.codex/sessions/**/rollout-*.jsonl` | real **%** of the 5h and weekly windows, with reset times and plan |
 | **Antigravity** | `~/.gemini/antigravity-cli/conversations/*.db`, plus the desktop app's local server | 5h / 7d tokens and requests per model; real **%** per quota bucket while the desktop app is open (the last reading is kept after you close it) |
 
@@ -86,7 +86,8 @@ On Windows the binary is `target\release\trayce.exe`. On macOS, build the
 show a menu-bar item.
 
 Out of the box only Claude is enabled. Open the tray menu, go to **Enabled AIs**
-and tick the other tools you use.
+and tick the other tools you use. For Claude's real percentages, also run
+`trayce --setup-claude` once (see [Claude Code](#claude-code)).
 
 ## Using the tray
 
@@ -212,6 +213,8 @@ cargo build --release
 | `trayce --selftest` | Runs internal asserts and exits 0 on pass. |
 | `trayce --install` | Starts Trayce on login. |
 | `trayce --uninstall` | Stops starting Trayce on login. |
+| `trayce --setup-claude` | Registers Trayce as Claude Code's status line, which gives it Claude's real percentages. |
+| `trayce --claude-statusline` | The status-line command itself. Claude Code calls it with JSON on stdin. |
 
 On Windows, Trayce is a windowed app, so PowerShell does not wait for its
 output. Add `| Out-Host` to see it in order, for example
@@ -270,6 +273,8 @@ Files Trayce writes, and nothing else:
 |------|---------|
 | `<data_dir>/trayce/config.json` | enabled tools and display mode |
 | `<data_dir>/trayce/antigravity_quota.json` | last Antigravity quota reading |
+| `<data_dir>/trayce/claude_rate_limits.json` | last Claude status-line snapshot |
+| `~/.claude/settings.json` | only with `--setup-claude`: the `statusLine` entry (backup kept alongside) |
 | `<data_dir>/claude-usage-bar/calibration.json` | learned Claude limit. It keeps the original app's path, so an existing calibration carries over |
 
 `<data_dir>` depends on the OS:
@@ -281,19 +286,37 @@ Files Trayce writes, and nothing else:
 
 ### Claude Code
 
+**Real percentages (recommended): run `trayce --setup-claude` once.**
+
+- **Where the numbers come from:** Claude Code passes its own plan usage to
+  its [status line](https://code.claude.com/docs/en/statusline) command:
+  `rate_limits.five_hour` and `rate_limits.seven_day`, each with
+  `used_percentage` and `resets_at`.
+- **What `--setup-claude` does:** it sets `trayce --claude-statusline` as that
+  command in `~/.claude/settings.json`, after backing the file up to
+  `settings.json.trayce-backup`.
+  - On each Claude reply, Trayce saves the numbers for the tray. Claude Code's
+    status bar also shows a short `5h 42% · 7d 18%`.
+  - These are the same percentages Claude Code shows, for Pro and Max plans.
+- **If you already have a status line:** Trayce leaves it alone. Pipe the same
+  JSON into `trayce --claude-statusline` from your own script instead.
+- **To undo:** run `/statusline delete` in Claude Code.
+
+**Without the status line, Trayce falls back to the logs:**
+
 - **Tokens:** Trayce parses the JSONL session logs Claude Code writes (the same
   source as `ccusage`). It sums tokens into the active **5h** block and a
   rolling **7d** total.
 - **What counts:** `input + output + cache_creation`. Cache *reads* are
   excluded: they are cheap and automatic, and would be about 97% of the
   number otherwise.
-- **The percentage is learned, not fetched.** Anthropic does not publish plan
-  limits. When you hit your 5h limit, Claude Code logs a `429 · resets …`
-  event, and your token count at that moment becomes the learned limit.
-  - After the first hit, the 5h window shows a real **percent**. Before it,
-    the window shows **tokens** and the colour uses a heuristic cap.
-  - A learned limit is trusted for 7 days, then the window goes back to tokens
-    until your next hit.
+- **The 5h percentage is estimated from your limit hits.** When you hit your
+  5h limit, Claude Code logs a `429 · resets …` event, and your token count at
+  that moment becomes the learned limit.
+  - A learned limit is trusted for 7 days.
+  - A later 5h block that goes over it without a hit proves it too low, so it
+    is dropped. The window then shows tokens again instead of a percentage
+    over 100%.
   - Details:
     [docs/design/limits-and-calibration.md](docs/design/limits-and-calibration.md).
 - **Why local logs:** the original app called Anthropic's undocumented usage
@@ -342,7 +365,9 @@ servers:
 - **What it reads:** local logs and databases that contain your prompts and
   code. From them Trayce extracts only token counts, limit state and model names.
 - **Credentials:** it never reads or sends tokens or credentials.
-- **Files:** it opens every file read-only.
+- **Files:** it opens the tools' logs and databases read-only. The one
+  exception is `trayce --setup-claude`, which edits Claude Code's
+  `settings.json`, and only when you run it.
 - **Network:** the one exception is a request to `127.0.0.1`, the Antigravity
   desktop app's own local server, and only while that app runs. Nothing leaves
   your machine.
@@ -353,11 +378,11 @@ servers:
   other machines, or from the web apps (claude.ai, ChatGPT, Gemini), is not
   counted, so the token totals are a lower bound.
 - **Claude:**
-  - The 5h percent needs one limit hit to calibrate.
-  - The 7d window stays in tokens, because the weekly-limit log event is not
-    confirmed yet.
-  - Tokens are summed flat, although Opus weighs more than Sonnet against the
-    limit.
+  - Real percentages need the status line (`trayce --setup-claude`) and a
+    Pro/Max plan. They are as fresh as Claude Code's last reply.
+  - The log fallback is an estimate: tokens are summed flat, although Opus
+    weighs more than Sonnet against the limit, and the 7d window stays in
+    tokens.
 - **Codex:** the numbers are as fresh as your last Codex turn.
 - **Antigravity:**
   - A real % needs the desktop app, not just the CLI.

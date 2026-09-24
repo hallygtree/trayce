@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::WidgetError;
 use crate::usage::Report;
-use crate::{antigravity, codex, logs};
+use crate::{antigravity, claude_statusline, codex, logs};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Provider {
@@ -27,9 +27,28 @@ impl Provider {
 
     pub fn collect(self, now: DateTime<Utc>) -> Result<Report, WidgetError> {
         match self {
-            Provider::Claude => logs::collect(now).map(Report::from),
+            Provider::Claude => claude(now),
             Provider::Codex => codex::collect(now),
             Provider::Antigravity => antigravity::collect(now),
         }
+    }
+}
+
+/// Claude: the real percentages from the status-line snapshot when there is
+/// one, with the per-model token notes from the logs; otherwise the logs alone.
+fn claude(now: DateTime<Utc>) -> Result<Report, WidgetError> {
+    let logs = logs::collect(now).map(Report::from);
+    match claude_statusline::report(now) {
+        Some(mut live) => {
+            if let Ok(r) = logs {
+                live.notes.extend(r.notes);
+            }
+            Ok(live)
+        }
+        None => logs.map(|mut r| {
+            r.notes
+                .push("Real %: run `trayce --setup-claude`".to_string());
+            r
+        }),
     }
 }

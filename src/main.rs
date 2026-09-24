@@ -6,6 +6,7 @@ mod antigravity;
 mod antigravity_live;
 mod autostart;
 mod calibration;
+mod claude_statusline;
 mod codex;
 mod config;
 mod error;
@@ -48,6 +49,8 @@ fn main() {
         Some("--selftest") => run_selftest(),
         Some("--install") => autostart::install(),
         Some("--uninstall") => autostart::uninstall(),
+        Some("--claude-statusline") => claude_statusline::record(),
+        Some("--setup-claude") => claude_statusline::setup(),
         _ => tray::run(),
     }
 }
@@ -114,26 +117,25 @@ fn run_diagnose() {
         None => println!("5h calibration: not calibrated (no session-limit hit seen yet)"),
     }
 
-    println!(
-        "
-[Codex]"
-    );
+    match claude_statusline::report(chrono::Utc::now()) {
+        Some(r) => println!(
+            "status line:   {} ({})",
+            render::title_text(&r),
+            r.notes.first().map(String::as_str).unwrap_or("")
+        ),
+        None => println!("status line:   no snapshot (run `trayce --setup-claude`)"),
+    }
+
+    println!("\n[Codex]");
     let (dir, files) = codex::diagnose();
     println!("sessions dir:  {}", dir.as_deref().unwrap_or("NOT FOUND"));
     println!("rollouts (<=7d): {files}");
 
-    println!(
-        "
-[Antigravity]"
-    );
+    println!("\n[Antigravity]");
     for line in antigravity::diagnose() {
         println!("{line}");
     }
-    println!(
-        "
-config: {:?}",
-        config::load()
-    );
+    println!("\nconfig: {:?}", config::load());
 }
 
 fn run_selftest() {

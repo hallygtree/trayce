@@ -312,6 +312,46 @@ fn fresh_five_hour(cal: &Calibration, now: DateTime<Utc>) -> Option<u64> {
     }
 }
 
+/// A learned limit is disproven once a later block with no limit hit in it
+/// used more tokens than the limit: the real limit must be higher (it was
+/// learned under a different model mix, or claude.ai usage filled the shared
+/// bucket). Without this, one low sample shows percentages above 100%. Pure.
+fn disproven(
+    cal: &Calibration,
+    blks: &[Block],
+    limit_events: &[LimitEvent],
+    limit: u64,
+) -> bool {
+    let Some(learned) = cal
+        .five_hour_updated
+        .as_deref()
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+    else {
+        return false;
+    };
+    let learned = learned.with_timezone(&Utc);
+    let hit_in = |b: &Block| {
+        limit_events.iter().any(|e| {
+            e.kind == LimitKind::Session
+                && e.ts >= b.start
+                && (e.ts - b.start).num_seconds() < FIVE_HOURS
+        })
+    };
+    blks.iter()
+        .filter(|b| b.start > learned && !hit_in(b))
+        .any(|b| b.tokens > limit)
+}
+
+/// The 5h limit to use: learned within the TTL and not disproven since.
+fn usable_five_hour(
+    cal: &Calibration,
+    blks: &[Block],
+    limit_events: &[LimitEvent],
+    now: DateTime<Utc>,
+) -> Option<u64> {
+    fresh_five_hour(cal, now).filter(|&l| !disproven(cal, blks, limit_events, l))
+}
+
 fn make_window(tokens: u64, limit: Option<u64>, cap: u64, resets_at: Option<String>) -> Window {
     let denom = limit.unwrap_or(cap).max(1);
     let pct = ((tokens as f64 / denom as f64) * 100.0).round() as u32;
@@ -483,7 +523,7 @@ pub fn collect(now: DateTime<Utc>) -> Result<Usage, WidgetError> {
     let blks = blocks(&prepared);
     let cal = update_calibration(calibration::load(), &blks, &scan.limit_events, now);
     let limits = Limits {
-        five_hour: fresh_five_hour(&cal, now),
+        five_hour: usable_five_hour(&cal, &blks, &scan.limit_events, now),
         weekly: cal.weekly_limit,
     };
     Ok(aggregate_prepared(&prepared, &blks, now, limits))
@@ -520,7 +560,8 @@ pub fn diagnose(now: DateTime<Utc>) -> Diagnostics {
                 usage_events: prepared.len(),
                 limit_events,
                 malformed: scan.malformed,
-                five_hour_fresh: fresh_five_hour(&cal, now).is_some(),
+                five_hour_fresh: usable_five_hour(&cal, &blks, &scan.limit_events, now)
+                    .is_some(),
                 calibration: cal,
             }
         }
@@ -722,6 +763,36 @@ mod tests {
         // Same hit seen 8 days later is stale and ignored.
         let stale = learn_five_hour(&blks, &[hit], at("2026-05-31T05:00:00Z"));
         assert!(stale.is_none());
+    }
+
+    #[test]
+    fn calibration_disproven_by_bigger_block_without_hit() {
+        let cal = Calibration {
+            five_hour_limit: Some(640_000),
+            five_hour_updated: Some("2026-09-21T18:36:00Z".to_string()),
+            ..Calibration::default()
+        };
+        let block = |start: &str, tokens| Block {
+            start: at(start),
+            tokens,
+        };
+        let hit = |ts: &str| LimitEvent {
+            ts: at(ts),
+            kind: LimitKind::Session,
+            reset_label: None,
+        };
+        let old = block("2026-09-21T15:00:00Z", 640_000);
+        let big = block("2026-09-24T09:00:00Z", 1_200_000);
+        let now = at("2026-09-24T11:00:00Z");
+        // A later block used more than the limit without hitting it.
+        assert!(disproven(&cal, &[old.clone(), big.clone()], &[], 640_000));
+        assert_eq!(usable_five_hour(&cal, &[old.clone(), big.clone()], &[], now), None);
+        // The same block with a hit in it proves nothing against the limit.
+        let hits = [hit("2026-09-24T10:30:00Z")];
+        assert!(!disproven(&cal, &[old.clone(), big], &hits, 640_000));
+        // Smaller later blocks keep the calibration.
+        let small = block("2026-09-24T09:00:00Z", 300_000);
+        assert_eq!(usable_five_hour(&cal, &[old, small], &[], now), Some(640_000));
     }
 
     #[test]
