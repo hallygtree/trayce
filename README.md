@@ -4,8 +4,7 @@
 [![License](https://img.shields.io/github/license/hallygtree/trayce)](LICENSE)
 
 **Trayce is a system-tray app for macOS, Linux and Windows. It shows how much
-of your AI coding plans you have used (Claude Code, Codex CLI and
-Antigravity) without opening any of them.**
+of your AI coding plans you have used without opening any of them.**
 
 It reads the local data each tool already writes to disk. It makes no internet
 calls and never touches your tokens or credentials.
