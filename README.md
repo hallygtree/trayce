@@ -52,9 +52,22 @@ which covered Claude only.
 
 ## Quick start
 
-Trayce is built from source for now; there are no published releases yet. You need the
-[Rust toolchain](https://rustup.rs). Windows also needs the MSVC build tools,
-and Linux needs the tray libraries; see [Install](#install).
+**Windows:** one line in PowerShell, no admin rights, no toolchain:
+
+```powershell
+irm https://raw.githubusercontent.com/hallygtree/trayce/main/install.ps1 | iex
+```
+
+This command:
+- installs Trayce in `%LOCALAPPDATA%\Programs\trayce`
+- sets it to start on login
+- starts it
+
+Run the same line again to update.
+
+**macOS / Linux, or from source:** you need the
+[Rust toolchain](https://rustup.rs). Linux also needs the tray libraries; see
+[Install](#install).
 
 ```bash
 git clone https://github.com/hallygtree/trayce.git
@@ -114,14 +127,11 @@ immediately and trigger a refresh.
 
 ### Prebuilt binaries
 
-The release workflow builds macOS, Linux and Windows binaries whenever a `v*`
-tag is pushed, and attaches them to the
+Every release ships macOS, Linux and Windows builds on the
 [Releases](https://github.com/hallygtree/trayce/releases) page:
 - macOS: `trayce-macos.zip`, which contains `Trayce.app`
 - Linux: `trayce-linux.tar.gz`
 - Windows: `trayce-windows.zip`
-
-No release has been published yet. Until then, build from source as described below.
 
 > [!NOTE]
 > The binaries are not code-signed. On the first launch on **macOS**, right-click
@@ -155,25 +165,41 @@ extension. KDE, XFCE and most other desktops work out of the box.
 
 ### Windows
 
-1. Install [Rust](https://rustup.rs) and the Visual Studio **Build Tools**
-   with the *Desktop development with C++* workload. With winget:
-   ```powershell
-   winget install Rustlang.Rustup
-   winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-   ```
-2. Build, then move `target\release\trayce.exe` somewhere stable, for example
-   `%LOCALAPPDATA%\Programs\trayce\`:
-   ```powershell
-   cargo build --release
-   ```
-3. Start on login. This writes an `HKCU\...\Run` value with the binary's
-   current path:
-   ```powershell
-   trayce.exe --install
-   ```
+Install or update, as the current user with no admin rights:
 
-`--install` records the binary's current path, so run it again after moving the
-executable. To remove it: `trayce.exe --uninstall`.
+```powershell
+irm https://raw.githubusercontent.com/hallygtree/trayce/main/install.ps1 | iex
+```
+
+[`install.ps1`](install.ps1) takes these steps:
+1. Downloads the latest `trayce-windows.zip` release.
+2. Stops a running copy, if any.
+3. Unpacks it to `%LOCALAPPDATA%\Programs\trayce`.
+4. Registers start-on-login (an `HKCU\...\Run` value).
+5. Starts the app.
+
+Uninstall:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/hallygtree/trayce/main/install.ps1))) -Uninstall
+```
+
+Your settings in `%APPDATA%\trayce` are kept on update and uninstall.
+
+<details>
+<summary>Build from source instead</summary>
+
+You need [Rust](https://rustup.rs) and the Visual Studio **Build Tools** with
+the *Desktop development with C++* workload:
+
+```powershell
+winget install Rustlang.Rustup
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+cargo build --release
+.\target\release\trayce.exe --install    # start on login from this path
+```
+
+</details>
 
 ## CLI reference
 
@@ -186,6 +212,11 @@ executable. To remove it: `trayce.exe --uninstall`.
 | `trayce --selftest` | Runs internal asserts and exits 0 on pass. |
 | `trayce --install` | Starts Trayce on login. |
 | `trayce --uninstall` | Stops starting Trayce on login. |
+
+On Windows, Trayce is a windowed app, so PowerShell does not wait for its
+output. Add `| Out-Host` to see it in order, for example
+`trayce --once all | Out-Host`. The installed binary is
+`%LOCALAPPDATA%\Programs\trayce\trayce.exe`.
 
 Example:
 
@@ -332,7 +363,6 @@ servers:
   - A real % needs the desktop app, not just the CLI.
   - The data formats are undocumented and may change.
   - Some users report the backend returning a fixed 100% remaining.
-- **Windows:** launching `trayce.exe` directly also opens a console window.
 
 Tested with Claude Code 2.1.x, Codex CLI 0.154, and Antigravity CLI (`agy`)
 1.2.10. CI builds and tests on macOS, Linux and Windows. Log formats change

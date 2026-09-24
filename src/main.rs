@@ -1,3 +1,7 @@
+// A GUI-subsystem binary on Windows: no console window next to the tray.
+// CLI flags re-attach to the calling terminal in `main`.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod antigravity;
 mod antigravity_live;
 mod autostart;
@@ -13,7 +17,31 @@ mod usage;
 
 use providers::Provider;
 
+/// Borrow the parent terminal's console so CLI output is visible. Skipped when
+/// stdout is already redirected (pipes, `$x = trayce ...`), which would
+/// otherwise be replaced. Without a terminal (double-click, login) it fails
+/// silently and nothing is printed.
+#[cfg(windows)]
+fn attach_console() {
+    use std::os::windows::io::AsRawHandle;
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    extern "system" {
+        fn AttachConsole(pid: u32) -> i32;
+    }
+    if !std::io::stdout().as_raw_handle().is_null() {
+        return;
+    }
+    // SAFETY: plain Win32 call with a constant argument; no pointers involved.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
 fn main() {
+    #[cfg(windows)]
+    if std::env::args().nth(1).is_some() {
+        attach_console();
+    }
     match std::env::args().nth(1).as_deref() {
         Some("--once") => run_once(),
         Some("--diagnose") => run_diagnose(),
