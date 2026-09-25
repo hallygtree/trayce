@@ -34,10 +34,10 @@ which covered Claude only.
 - **You choose what shows.** Turn each tool on or off, and show all of them or just one, from the tray menu itself.
 - **Real percentages where they exist.**
   - **Codex:** the server's own numbers.
-  - **Antigravity:** the real quota while its desktop app is open.
+  - **Antigravity:** the real quota from the `agy` CLI or the desktop app.
   - **Claude:** Claude Code's own numbers, via its status line.
 - **No fake precision.** A window with no known limit shows a token count instead of a guessed percentage.
-- **Offline and read-only.** No credentials read, no calls to any provider, log files opened read-only.
+- **Offline and read-only.** No credentials read, no calls to any provider from Trayce itself, log files opened read-only.
 - **A colour you can read at a glance.** The icon dot turns green, orange or red with the fullest window on screen.
 - **A single small Rust binary.**
 
@@ -47,7 +47,7 @@ which covered Claude only.
 |------|-------------------------|--------------|
 | **Claude Code** | Claude Code's status-line data, plus `~/.claude/projects/**/*.jsonl` | real **%** of the 5h and weekly windows once the status line is set up (`trayce --setup-claude`); otherwise 5h / 7d tokens with an estimated 5h % |
 | **Codex CLI** | `~/.codex/sessions/**/rollout-*.jsonl` | real **%** of the 5h and weekly windows, with reset times and plan |
-| **Antigravity** | `~/.gemini/antigravity-cli/conversations/*.db`, plus the desktop app's local server | 5h / 7d tokens and requests per model; real **%** per quota bucket while the desktop app is open (the last reading is kept after you close it) |
+| **Antigravity** | `~/.gemini/antigravity-cli/conversations/*.db`, plus `agy -p /usage` or the desktop app's local server | 5h / 7d tokens and requests per model; real **%** per quota bucket (the last reading is kept) |
 
 ## Quick start
 
@@ -208,7 +208,7 @@ cargo build --release
 | `trayce` | Runs the tray app (default). |
 | `trayce --once` | Prints current usage of the **enabled** tools and exits. |
 | `trayce --once all` | Same, for **every** supported tool. The quickest check on a new machine. |
-| `trayce --diagnose` | Prints what was found for each tool, for support. For Claude: log dir, event counts, limit events and calibration. For Codex: sessions dir and rollouts. For Antigravity: databases, readable and unreadable rows, the desktop app's server, and the cached quota. It prints no prompts, code or tokens. |
+| `trayce --diagnose` | Prints what was found for each tool, for support. For Claude: log dir, event counts, limit events and calibration. For Codex: sessions dir and rollouts. For Antigravity: databases, readable and unreadable rows, the quota from the desktop app and from `agy /usage`, and the cached quota. It prints no prompts, code or tokens. |
 | `trayce --selftest` | Runs internal asserts and exits 0 on pass. |
 | `trayce --install` | Starts Trayce on login. |
 | `trayce --uninstall` | Stops starting Trayce on login. |
@@ -237,7 +237,7 @@ $ trayce --once all
 [Antigravity]
   5h window      195k tok
   Weekly (7d)    195k tok
-  Quota %: open the Antigravity app once
+  Quota %: sign in to agy or open the Antigravity app
   7d · gemini-3.8-flash   22 req · 195k tok
 ```
 
@@ -342,20 +342,20 @@ Trayce reads Antigravity in two layers:
      cache reads excluded) and adds per-model request counts.
    - The data is undocumented protobuf, so a future Antigravity release may
      break it. If that happens, Antigravity alone shows `logs unreadable`.
-2. **The real %, while the desktop app is open.**
-   - The Antigravity desktop app runs a local language server. Trayce asks it
-     for the same quota buckets the app shows, on `127.0.0.1` only.
+2. **The real %, from the desktop app or the CLI.**
+   - While the desktop app is open, Trayce asks its local language server for
+     the same quota buckets the app shows, on `127.0.0.1` only.
+   - Otherwise it runs `agy -p /usage --output-format json`, at most every
+     5 minutes. Since agy 1.1.11 this answers without an agent turn, so it
+     spends no quota and leaves no conversation behind.
    - Buckets outside the main group (for example third-party models) appear as
      notes.
    - The answer is cached, so after you close the app you still see it
      ("last seen 2h ago"). A bucket whose reset time has passed shows `0%`.
 
-Trayce doesn't always show a real % because the quota lives only on Google's
-servers:
-- The `agy` CLI's own local server requires a token the CLI does not expose.
-- `agy -p /usage` is sent to the model as a normal prompt, which spends quota.
-- Calling Google directly with the Antigravity OAuth token is what got
-  accounts banned in 2026.
+Trayce never calls Google itself: calling it with the Antigravity OAuth
+token is what got accounts banned in 2026. `agy` makes the request with its
+own login, as when you type `/usage`.
 
 **Trayce never reads `oauth_creds.json`.**
 
@@ -367,9 +367,9 @@ servers:
 - **Files:** it opens the tools' logs and databases read-only. The one
   exception is `trayce --setup-claude`, which edits Claude Code's
   `settings.json`, and only when you run it.
-- **Network:** the one exception is a request to `127.0.0.1`, the Antigravity
-  desktop app's own local server, and only while that app runs. Nothing leaves
-  your machine.
+- **Network:** Trayce itself only talks to `127.0.0.1`, the Antigravity
+  desktop app's own local server, while that app runs. Without the app it runs
+  `agy -p /usage`, and `agy` asks Google for your quota with its own login.
 
 ## Limitations
 
@@ -384,7 +384,7 @@ servers:
     tokens.
 - **Codex:** the numbers are as fresh as your last Codex turn.
 - **Antigravity:**
-  - A real % needs the desktop app, not just the CLI.
+  - A real % needs `agy` signed in (1.1.11+) or the desktop app open.
   - The data formats are undocumented and may change.
   - Some users report the backend returning a fixed 100% remaining.
 
@@ -413,7 +413,7 @@ src/
   calibration.rs       Claude: learned plan limit
   codex.rs             Codex: rate_limits snapshots
   antigravity.rs       Antigravity: conversation DBs, quota cache
-  antigravity_live.rs  Antigravity: desktop app's local quota server
+  antigravity_live.rs  Antigravity: live quota (desktop app server, agy /usage)
   autostart.rs         per-OS login auto-start
 ```
 

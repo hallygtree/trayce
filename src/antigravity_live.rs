@@ -6,11 +6,14 @@
 //! `resetTime`). Traffic never leaves 127.0.0.1 and no Google credential is
 //! touched. Same approach as CodexBar (steipete/CodexBar, docs/antigravity.md).
 //!
-//! The `agy` CLI also runs a server, but it demands a CSRF token it does not
-//! expose, so only the desktop app (or IDE) is usable here.
+//! Without the app, `agy -p /usage --output-format json` returns the same
+//! buckets under `command.data`, with no agent turn and no quota spent
+//! (agy >= 1.1.11). The CLI makes the Google call with its own login.
 
-use std::process::Command;
-use std::time::Duration;
+use std::io::Read;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
@@ -71,9 +74,34 @@ fn run(cmd: &mut Command) -> String {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    cmd.output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default()
+    let Ok(mut child) = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return String::new();
+    };
+    // Drain stdout on a thread so a large output cannot fill the pipe.
+    let mut pipe = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = pipe.as_mut() {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+    // A signed-out or stuck `agy` must not hang the poll loop.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while matches!(child.try_wait(), Ok(None)) {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.wait();
+    String::from_utf8_lossy(&reader.join().unwrap_or_default()).into_owned()
 }
 
 /// Loopback ports `pid` listens on, from `netstat -ano` output. Matches on the
@@ -178,7 +206,12 @@ fn str_of<'a>(v: &'a Value, keys: &[&str]) -> &'a str {
 /// `remaining`, or a protobuf oneof (`{"case": "remainingFraction", "value": x}`).
 /// Buckets without a known fraction or marked disabled are dropped. Pure.
 fn parse_summary(v: &Value) -> Option<Vec<Bucket>> {
-    let payload = v.get("response").or(v.get("summary")).unwrap_or(v);
+    // agy's `response` is the TSV text, so `command.data` must win.
+    let payload = v
+        .pointer("/command/data")
+        .or(v.get("response"))
+        .or(v.get("summary"))
+        .unwrap_or(v);
     let mut out = Vec::new();
     for g in payload.get("groups")?.as_array()? {
         let group = match str_of(g, &["displayName", "name"]) {
@@ -195,6 +228,7 @@ fn parse_summary(v: &Value) -> Option<Vec<Bucket>> {
             let rem = b.get("remaining");
             let fraction = b
                 .get("remainingFraction")
+                .or(b.get("remaining_fraction"))
                 .or(rem.and_then(|r| r.get("remainingFraction")))
                 .or(rem
                     .filter(|r| r.get("case").and_then(Value::as_str) == Some("remainingFraction"))
@@ -208,9 +242,8 @@ fn parse_summary(v: &Value) -> Option<Vec<Bucket>> {
                 group: group.to_string(),
                 label: window_label(id, str_of(b, &["displayName", "name"])),
                 remaining_fraction: fraction,
-                reset_time: b
-                    .get("resetTime")
-                    .and_then(Value::as_str)
+                reset_time: Some(str_of(b, &["resetTime", "reset_time"]))
+                    .filter(|s| !s.is_empty())
                     .map(str::to_string),
             });
         }
@@ -246,16 +279,40 @@ pub fn fetch() -> Result<Vec<Bucket>, String> {
     Err(last_err)
 }
 
-/// Lines for `--diagnose`. Never prints the CSRF token.
-pub fn diagnose() -> Vec<String> {
-    let servers = servers();
-    let mut out = vec![format!("app language servers: {}", servers.len())];
-    for s in &servers {
-        out.push(format!("  - pid {} ports {:?}", s.pid, ports(s.pid)));
+fn agy_bin() -> PathBuf {
+    // ponytail: only the observed Windows install path; add others when seen.
+    dirs::data_local_dir()
+        .map(|d| d.join("agy").join("bin").join("agy.exe"))
+        .filter(|p| cfg!(windows) && p.exists())
+        .unwrap_or_else(|| "agy".into())
+}
+
+/// Quota buckets from the `agy` CLI, or why none could be read.
+pub fn fetch_cli() -> Result<Vec<Bucket>, String> {
+    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    // No shell, so `/usage` reaches agy as-is (Git Bash would mangle it).
+    let out = run(Command::new(agy_bin())
+        .args([
+            "-p",
+            "/usage",
+            "--output-format",
+            "json",
+            "--log-file",
+            null,
+        ])
+        .current_dir(std::env::temp_dir()));
+    if out.trim().is_empty() {
+        return Err("agy not found or no output".to_string());
     }
-    match fetch() {
+    let v: Value =
+        serde_json::from_str(out.trim()).map_err(|_| "agy: unexpected output".to_string())?;
+    parse_summary(&v).ok_or_else(|| "agy: no quota in response (signed in?)".to_string())
+}
+
+fn diagnose_buckets(out: &mut Vec<String>, what: &str, r: Result<Vec<Bucket>, String>) {
+    match r {
         Ok(b) => {
-            out.push(format!("live quota: {} bucket(s)", b.len()));
+            out.push(format!("{what}: {} bucket(s)", b.len()));
             for x in b {
                 out.push(format!(
                     "  - {} · {}  {:.0}% left, resets {}",
@@ -266,8 +323,19 @@ pub fn diagnose() -> Vec<String> {
                 ));
             }
         }
-        Err(e) => out.push(format!("live quota: unavailable ({e})")),
+        Err(e) => out.push(format!("{what}: unavailable ({e})")),
     }
+}
+
+/// Lines for `--diagnose`. Never prints the CSRF token.
+pub fn diagnose() -> Vec<String> {
+    let servers = servers();
+    let mut out = vec![format!("app language servers: {}", servers.len())];
+    for s in &servers {
+        out.push(format!("  - pid {} ports {:?}", s.pid, ports(s.pid)));
+    }
+    diagnose_buckets(&mut out, "app quota", fetch());
+    diagnose_buckets(&mut out, "agy /usage", fetch_cli());
     out
 }
 
@@ -347,5 +415,28 @@ mod tests {
         .unwrap();
         assert_eq!(parse_summary(&root).unwrap()[0].group, "Quota");
         assert!(parse_summary(&json!({"code":"unauthenticated"})).is_none());
+
+        // Real `agy -p /usage --output-format json` output (agy 1.2.10).
+        let agy: Value = serde_json::from_str(
+            r#"{"conversation_id":"","status":"SUCCESS","response":"Gemini Models\tWeekly Limit Remaining\t100%\n","num_turns":0,
+            "command":{"name":"usage","data":{"groups":[
+                {"name":"Gemini Models","buckets":[
+                    {"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.9982794523239136,"reset_time":"2026-10-01T12:27:52Z"},
+                    {"id":"gemini-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":0.9994490742683411,"reset_time":"2026-09-25T03:46:15Z"}]},
+                {"name":"Claude and GPT models","buckets":[
+                    {"id":"3p-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":1,"reset_time":"2026-10-01T22:46:38Z"},
+                    {"id":"3p-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":1,"reset_time":"2026-09-25T03:46:38Z"}]}]}}}"#,
+        )
+        .unwrap();
+        let b = parse_summary(&agy).unwrap();
+        assert_eq!(b.len(), 4);
+        assert_eq!(
+            (b[0].group.as_str(), b[0].label.as_str()),
+            ("Gemini Models", "Weekly (7d)")
+        );
+        assert_eq!(b[1].label, "5h window");
+        assert!((b[1].remaining_fraction - 0.9994).abs() < 1e-3);
+        assert_eq!(b[1].reset_time.as_deref(), Some("2026-09-25T03:46:15Z"));
+        assert_eq!(b[3].group, "Claude and GPT models");
     }
 }

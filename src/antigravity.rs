@@ -8,9 +8,9 @@
 //!    `gen_metadata.data` → 1 { 4 { 2: input, 3: output, 5: cache read,
 //!    9: thinking }, 19: model, 20: map<string,string> incl. `last_step_index` };
 //!    `steps.metadata` → 1 { 1: unix seconds }.
-//! 2. When the Antigravity desktop app is running: the real per-bucket quota
-//!    from its local language server (`antigravity_live.rs`), cached on disk so
-//!    the last reading survives the app closing.
+//! 2. The real per-bucket quota (`antigravity_live.rs`): from the desktop app's
+//!    local language server when it runs, else from `agy -p /usage`. Cached on
+//!    disk so the last reading survives both being unavailable.
 //!
 //! Never reads `oauth_creds.json` and never talks to Google directly: using the
 //! Antigravity OAuth token from third-party tools got accounts banned in 2026.
@@ -378,7 +378,20 @@ fn apply_quota(r: &mut Report, buckets: &[Bucket], seen: DateTime<Utc>, now: Dat
 
 pub fn collect(now: DateTime<Utc>) -> Result<Report, WidgetError> {
     let local = scan();
-    let live = antigravity_live::fetch();
+    let cache = load_cache();
+    // ponytail: 5 min throttle, an agy spawn costs ~5 s plus a Google round trip.
+    let stale = cache.as_ref().is_none_or(|c| {
+        DateTime::parse_from_rfc3339(&c.fetched_at).map_or(true, |t| {
+            now - t.with_timezone(&Utc) >= Duration::minutes(5)
+        })
+    });
+    let live = antigravity_live::fetch().or_else(|e| {
+        if stale {
+            antigravity_live::fetch_cli()
+        } else {
+            Err(e)
+        }
+    });
     let cached = match live {
         Ok(buckets) => {
             let c = Cached {
@@ -388,7 +401,7 @@ pub fn collect(now: DateTime<Utc>) -> Result<Report, WidgetError> {
             save_cache(&c);
             Some(c)
         }
-        Err(_) => load_cache(),
+        Err(_) => cache,
     };
     let mut report = match &local {
         Ok(s) => local_report(&s.reqs, now),
@@ -410,9 +423,10 @@ pub fn collect(now: DateTime<Utc>) -> Result<Report, WidgetError> {
             .unwrap_or(now);
         apply_quota(&mut report, &c.buckets, seen, now);
     } else {
-        report
-            .notes
-            .insert(0, "Quota %: open the Antigravity app once".to_string());
+        report.notes.insert(
+            0,
+            "Quota %: sign in to agy or open the Antigravity app".to_string(),
+        );
     }
     Ok(report)
 }
